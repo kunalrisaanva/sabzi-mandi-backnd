@@ -1,113 +1,224 @@
 import { ApiResponse } from "../utils/ApiResponse.js";
-
-import { ApiError } from "../utils/ApiError.js"
-
-import { asyncHandler } from "../utils/asyncHandler.js"
-
-import { User } from "../models/user.model.js"
+import { ApiError } from "../utils/ApiError.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
+import { User } from "../models/user.model.js";
+import { sendEmailOTP, sendPhoneOTP, verifyOTP, checkOTPRateLimit } from "../services/otp.service.js";
+import { getRedisClient } from "../config/redis.js";
 
 
 const genrateAccessTokenAndRefresToken = async (user) => {
-
     const accessToken = await user.genreateAccessToken();
     const refreshToken = await user.genrateRefreshToken();
-
     return { refreshToken, accessToken }
-
 }
 
+// ============================================
+// REGISTRATION - Step 1: Send OTP (Store data in Redis)
+// ============================================
 
 const userRegister = asyncHandler(async (req, res) => {
+    const { username, email, phone, password } = req.body;
 
+    // Validation - must provide either email or phone
+    if (!email && !phone) {
+        throw new ApiError(400, "Please provide either email or phone number");
+    }
 
-    const { username, email, password } = req.body;
+    if (!password) {
+        throw new ApiError(400, "Password is required");
+    }
 
-    // validation
+    if (password.length < 6) {
+        throw new ApiError(400, "Password must be at least 6 characters long");
+    }
 
-    if (!email || !password || !username.trim()) throw new ApiError(400, "Please provide all fields First")
+    let identifier, type, existingUser;
 
-    // check user already exist or not
+    // Determine if email or phone
+    if (email) {
+        identifier = email.trim();
+        type = 'email';
+        existingUser = await User.findOne({ email: identifier });
+    } else {
+        identifier = phone.trim();
+        type = 'phone';
+        existingUser = await User.findOne({ phone: identifier });
+    }
 
-    const user = await User.findOne({ email });
-    console.log("user --->", user)
+    // Check if user already exists in MongoDB
+    if (existingUser) {
+        throw new ApiError(400, `User with this ${type} already exists`);
+    }
 
-    if (user) throw new ApiError(400, "user already exist");
+    // Check rate limit
+    const rateLimit = await checkOTPRateLimit(identifier, type);
+    if (!rateLimit.allowed) {
+        throw new ApiError(429, rateLimit.message);
+    }
 
+    // Store registration data temporarily in Redis (2 minutes)
+    const redisClient = getRedisClient();
+    const registrationData = {
+        username: username || (email ? email.split('@')[0] : `user_${phone.slice(-4)}`),
+        email: email || null,
+        phone: phone || null,
+        password,
+        type
+    };
 
-    // saving into db
+    const redisKey = `registration:${type}:${identifier}`;
+    await redisClient.setEx(redisKey, 120, JSON.stringify(registrationData)); // 2 minutes
 
+    // Send OTP
+    if (type === 'email') {
+        await sendEmailOTP(identifier);
+    } else {
+        await sendPhoneOTP(identifier);
+    }
 
-    const createdUser = await User.create({
-        username,
-        email,
-        password
-
-    });
-
-    return res.
-        json(new ApiResponse(201, { createdUser }, "user created successfullt"))
+    return res.json(
+        new ApiResponse(200, { [type]: identifier }, `OTP sent to ${type} successfully. Valid for 2 minutes.`)
+    );
 });
 
 
-const userLogin = asyncHandler(async (req, res) => {
+// ============================================
+// REGISTRATION - Step 2: Verify OTP and Create User
+// ============================================
 
-    const { email, password } = req.body;
+const verifyOTPAndRegister = asyncHandler(async (req, res) => {
+    const { email, phone, otp } = req.body;
 
-    // validation 
+    // Validation
+    if (!email && !phone) {
+        throw new ApiError(400, "Please provide either email or phone number");
+    }
 
-    if (!email || !password) throw new ApiError(400, "Please provide all fields first")
+    if (!otp) {
+        throw new ApiError(400, "OTP is required");
+    }
 
-    const userLoggedIn = await User.findOne({ email }).select("+password")
+    let identifier, type;
 
+    // Determine if email or phone
+    if (email) {
+        identifier = email.trim();
+        type = 'email';
+    } else {
+        identifier = phone.trim();
+        type = 'phone';
+    }
 
-    if (!userLoggedIn) throw new ApiError(404, "User does not exist in db");
+    // Verify OTP
+    const otpVerification = await verifyOTP(identifier, otp, type);
+    if (!otpVerification.success) {
+        throw new ApiError(400, otpVerification.message);
+    }
 
-    // password match
+    // Get registration data from Redis
+    const redisClient = getRedisClient();
+    const redisKey = `registration:${type}:${identifier}`;
+    const registrationDataStr = await redisClient.get(redisKey);
 
-    const isMatch = await userLoggedIn.isPasswordMatch(password);
+    if (!registrationDataStr) {
+        throw new ApiError(400, "Registration session expired. Please register again.");
+    }
 
-    if (!isMatch) throw new ApiError(401, "Password does not match");
+    const registrationData = JSON.parse(registrationDataStr);
 
+    // Create user in MongoDB
+    const userData = {
+        username: registrationData.username,
+        password: registrationData.password
+    };
 
-    // genrarte access token and refreshtoken 
-    const { accessToken, refreshToken } = await genrateAccessTokenAndRefresToken(userLoggedIn);
+    if (email) {
+        userData.email = identifier;
+        userData.isEmailVerified = true;
+    } else {
+        userData.phone = identifier;
+        userData.isPhoneVerified = true;
+    }
 
-    // saving refreshtoken into db
+    const createdUser = await User.create(userData);
 
-    userLoggedIn.refreshToken = refreshToken
+    // Delete registration data from Redis
+    await redisClient.del(redisKey);
 
+    // Generate tokens
+    const { accessToken, refreshToken } = await genrateAccessTokenAndRefresToken(createdUser);
+    createdUser.refreshToken = refreshToken;
+    await createdUser.save({ validateBeforeSave: false });
 
-    await userLoggedIn.save({ validateBeforeSave: false })
-
-    // Remove password from response
-    const newUser = await User.findById({ _id: userLoggedIn._id }).lean().select("-refreshToken");
+    const userResponse = await User.findById(createdUser._id).select("-refreshToken");
 
     return res.json(
-        new ApiResponse(200, { user: newUser, accessToken, refreshToken }, "user logged in successfully")
-    )
+        new ApiResponse(201, { user: userResponse, accessToken, refreshToken }, "User registered successfully")
+    );
+});
 
-})
+
+// ============================================
+// LOGIN (Password-based with Email or Phone)
+// ============================================
+
+const userLogin = asyncHandler(async (req, res) => {
+    const { email, phone, password } = req.body;
+
+    // Validation
+    if (!password) {
+        throw new ApiError(400, "Password is required");
+    }
+
+    if (!email && !phone) {
+        throw new ApiError(400, "Please provide either email or phone number");
+    }
+
+    let identifier = email || phone;
+
+    // Find user by email or phone
+    const userLoggedIn = await User.findOne({
+        $or: [{ email: identifier }, { phone: identifier }]
+    }).select("+password");
+
+    if (!userLoggedIn) {
+        throw new ApiError(404, "User does not exist");
+    }
+
+    // Password match
+    const isMatch = await userLoggedIn.isPasswordMatch(password);
+    if (!isMatch) {
+        throw new ApiError(401, "Invalid credentials");
+    }
+
+    // Generate tokens
+    const { accessToken, refreshToken } = await genrateAccessTokenAndRefresToken(userLoggedIn);
+
+    // Save refresh token
+    userLoggedIn.refreshToken = refreshToken;
+    await userLoggedIn.save({ validateBeforeSave: false });
+
+    // Remove password from response
+    const newUser = await User.findById(userLoggedIn._id).select("-refreshToken");
+
+    return res.json(
+        new ApiResponse(200, { user: newUser, accessToken, refreshToken }, "User logged in successfully")
+    );
+});
+
 
 const logout = asyncHandler(async (req, res) => {
-
     // Clear refresh token from database
     await User.findByIdAndUpdate(
         req.user._id,
-        {
-            $unset: { refreshToken: 1 }
-        },
+        { $unset: { refreshToken: 1 } },
         { new: true }
     );
 
     return res.json(
         new ApiResponse(200, {}, "User logged out successfully")
     );
-
 });
 
 
-
-
-
-
-export { userRegister, userLogin, logout }
+export { userRegister, verifyOTPAndRegister, userLogin, logout }
