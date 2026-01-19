@@ -11,12 +11,24 @@ const generateOTP = () => {
     return Math.floor(100000 + Math.random() * 900000).toString();
 };
 
+// Helper function to set value with expiry (works with both Redis clients)
+const setWithExpiry = async (redisClient, key, value, expirySeconds) => {
+    // Upstash Redis uses 'set' with EX option
+    if (redisClient.set && typeof redisClient.set === 'function') {
+        await redisClient.set(key, value, { ex: expirySeconds });
+    }
+    // Local Redis uses 'setEx'
+    else if (redisClient.setEx) {
+        await redisClient.setEx(key, expirySeconds, value);
+    }
+};
+
 // Store OTP in Redis
 export const storeOTP = async (identifier, otp, type = 'email') => {
     try {
         const redisClient = getRedisClient();
         const key = `otp:${type}:${identifier}`;
-        await redisClient.setEx(key, OTP_EXPIRY, otp);
+        await setWithExpiry(redisClient, key, otp, OTP_EXPIRY);
         return true;
     } catch (error) {
         console.error('Error storing OTP:', error);
@@ -31,16 +43,29 @@ export const verifyOTP = async (identifier, otp, type = 'email') => {
         const key = `otp:${type}:${identifier}`;
         const storedOTP = await redisClient.get(key);
 
+        console.log('🔍 OTP Verification Debug:');
+        console.log('  Key:', key);
+        console.log('  Stored OTP:', storedOTP, '(type:', typeof storedOTP, ')');
+        console.log('  Provided OTP:', otp, '(type:', typeof otp, ')');
+
         if (!storedOTP) {
             return { success: false, message: 'OTP expired or not found' };
         }
 
-        if (storedOTP !== otp) {
+        // Convert both to strings for comparison
+        const storedOTPStr = String(storedOTP).trim();
+        const providedOTPStr = String(otp).trim();
+
+        console.log('  After conversion - Stored:', storedOTPStr, 'Provided:', providedOTPStr);
+        console.log('  Match:', storedOTPStr === providedOTPStr);
+
+        if (storedOTPStr !== providedOTPStr) {
             return { success: false, message: 'Invalid OTP' };
         }
 
         // Delete OTP after successful verification
         await redisClient.del(key);
+        console.log('✅ OTP verified and deleted');
         return { success: true, message: 'OTP verified successfully' };
     } catch (error) {
         console.error('Error verifying OTP:', error);
@@ -127,12 +152,12 @@ export const checkOTPRateLimit = async (identifier, type = 'email') => {
         const attempts = await redisClient.get(rateLimitKey);
 
         if (attempts && parseInt(attempts) >= 3) {
-            return { allowed: false, message: 'Too many OTP requests. Please try again after 15 minutes.' };
+            return { allowed: false, message: 'Too many OTP requests. Please try again after 2 minutes.' };
         }
 
         // Increment attempts
         const newAttempts = attempts ? parseInt(attempts) + 1 : 1;
-        await redisClient.setEx(rateLimitKey, 900, newAttempts.toString()); // 15 minutes
+        await setWithExpiry(redisClient, rateLimitKey, newAttempts.toString(), 120); // 2 minutes
 
         return { allowed: true };
     } catch (error) {
