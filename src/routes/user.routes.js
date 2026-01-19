@@ -1,19 +1,20 @@
 import express from "express";
-import { userRegister, userLogin, logout } from "../controller/user.controller.js";
+import { userRegister, verifyOTPAndRegister, userLogin, logout } from "../controller/user.controller.js";
 import { authMiddleware as verify } from "../middleware/auth.middleware.js";
 
 const router = express.Router();
 
-
+// Registration - Step 1: Send OTP (stores data in Redis for 2 minutes)
 router.route("/register").post(userRegister);
-router.route("/login").post(userLogin)
 
+// Registration - Step 2: Verify OTP and Create User
+router.route("/verify-otp").post(verifyOTPAndRegister);
 
-//protected routes
+// Login (Email or Phone with password)
+router.route("/login").post(userLogin);
 
-router.route("/me").get(verify, (req, res) => res.json({ user: req.user }))
-router.route("/logout").post(verify, logout)
+// Protected routes
+router.route("/me").get(verify, (req, res) => res.json({ user: req.user }));
+router.route("/logout").post(verify, logout);
 
-
-
-export { router } 
+export { router }
