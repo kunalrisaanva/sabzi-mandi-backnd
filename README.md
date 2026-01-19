@@ -47,7 +47,8 @@ npm run dev
 {
   "email": "user@example.com",
   "password": "password123",
-  "username": "johndoe"  // optional
+  "firstName": "John",
+  "lastName": "Doe"
 }
 ```
 
@@ -56,7 +57,8 @@ npm run dev
 {
   "phone": "+1234567890",
   "password": "password123",
-  "username": "johndoe"  // optional
+  "firstName": "John",
+  "lastName": "Doe"
 }
 ```
 

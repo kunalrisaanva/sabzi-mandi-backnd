@@ -4,8 +4,15 @@ import bcrypt from "bcrypt"
 
 const user_schema = new mongoose.Schema({
 
-    username: {
+    firstName: {
         type: String,
+        required: true,
+        trim: true
+    },
+
+    lastName: {
+        type: String,
+        required: true,
         trim: true
     },
 
@@ -40,10 +47,10 @@ const user_schema = new mongoose.Schema({
         default: false
     },
 
-    role:{
-        type:String,
-        enum:["farmer","trader","cold-storage"],
-        default:"farmer"
+    role: {
+        type: String,
+        enum: ["farmer", "trader", "cold-storage"],
+        default: "farmer"
     },
 
     refreshToken: {
