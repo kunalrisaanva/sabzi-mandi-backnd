@@ -17,7 +17,7 @@ const genrateAccessTokenAndRefresToken = async (user) => {
 // ============================================
 
 const userRegister = asyncHandler(async (req, res) => {
-    const { username, email, phone, password } = req.body;
+    const { firstName, lastName, email, phone, password } = req.body;
 
     // Validation - must provide either email or phone
     if (!email && !phone) {
@@ -30,6 +30,10 @@ const userRegister = asyncHandler(async (req, res) => {
 
     if (password.length < 6) {
         throw new ApiError(400, "Password must be at least 6 characters long");
+    }
+
+    if (!firstName || !lastName) {
+        throw new ApiError(400, "First name and last name are required");
     }
 
     let identifier, type, existingUser;
@@ -59,7 +63,8 @@ const userRegister = asyncHandler(async (req, res) => {
     // Store registration data temporarily in Redis (2 minutes)
     const redisClient = getRedisClient();
     const registrationData = {
-        username: username || (email ? email.split('@')[0] : `user_${phone.slice(-4)}`),
+        firstName: firstName.trim(),
+        lastName: lastName.trim(),
         email: email || null,
         phone: phone || null,
         password,
@@ -67,7 +72,15 @@ const userRegister = asyncHandler(async (req, res) => {
     };
 
     const redisKey = `registration:${type}:${identifier}`;
-    await redisClient.setEx(redisKey, 120, JSON.stringify(registrationData)); // 2 minutes
+
+    // Store in Redis (works with both Upstash and local Redis)
+    if (redisClient.set && typeof redisClient.set === 'function') {
+        // Upstash Redis
+        await redisClient.set(redisKey, JSON.stringify(registrationData), { ex: 120 });
+    } else {
+        // Local Redis
+        await redisClient.setEx(redisKey, 120, JSON.stringify(registrationData));
+    }
 
     // Send OTP
     if (type === 'email') {
@@ -124,11 +137,17 @@ const verifyOTPAndRegister = asyncHandler(async (req, res) => {
         throw new ApiError(400, "Registration session expired. Please register again.");
     }
 
-    const registrationData = JSON.parse(registrationDataStr);
+    // Upstash Redis auto-parses JSON, local Redis returns string
+    const registrationData = typeof registrationDataStr === 'string'
+        ? JSON.parse(registrationDataStr)
+        : registrationDataStr;
+
+    console.log('📦 Registration Data:', registrationData);
 
     // Create user in MongoDB
     const userData = {
-        username: registrationData.username,
+        firstName: registrationData.firstName,
+        lastName: registrationData.lastName,
         password: registrationData.password
     };
 
