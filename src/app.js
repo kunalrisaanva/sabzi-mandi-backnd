@@ -15,8 +15,11 @@ app.get("/", (req, res) => res.json({ msg: "Api is Running" }));
 // routes
 
 import { router as userRouter } from "./routes/user.routes.js";
+import { router as coldStorageRouter } from "./routes/coldStorage.routes.js";
 
 app.use("/api/v1/user", userRouter);
+app.use("/api/v1/cold-storage", coldStorageRouter);
+
 
 
 

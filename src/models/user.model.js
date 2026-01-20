@@ -53,6 +53,28 @@ const user_schema = new mongoose.Schema({
         default: "farmer"
     },
 
+    address:{
+        type:String,
+        required:true,
+        village:{
+            type:String,
+            required:true
+        },
+        district:{
+            type:String,
+            required:true
+        },
+        state:{
+            type:String,
+            required:true
+        },
+        pincode:{
+            type:String,
+            required:true
+        }
+    },
+
+
     refreshToken: {
         type: String,
     }

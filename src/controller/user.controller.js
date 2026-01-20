@@ -17,7 +17,7 @@ const genrateAccessTokenAndRefresToken = async (user) => {
 // ============================================
 
 const userRegister = asyncHandler(async (req, res) => {
-    const { firstName, lastName, email, phone, password } = req.body;
+    const { firstName, lastName, email, phone, password,address} = req.body;
 
     // Validation - must provide either email or phone
     if (!email && !phone) {
@@ -68,6 +68,7 @@ const userRegister = asyncHandler(async (req, res) => {
         email: email || null,
         phone: phone || null,
         password,
+        address,
         type
     };
 
@@ -142,7 +143,7 @@ const verifyOTPAndRegister = asyncHandler(async (req, res) => {
         ? JSON.parse(registrationDataStr)
         : registrationDataStr;
 
-    console.log('📦 Registration Data:', registrationData);
+    console.log('Registration Data:', registrationData);
 
     // Create user in MongoDB
     const userData = {
