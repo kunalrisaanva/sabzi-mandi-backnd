@@ -7,7 +7,8 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
-    "redis:clear": "node scripts/clear-redis.js"
+    "redis:clear": "node scripts/clear-redis.js",
+    "seed": "node src/db/seed.js"
   },
   "keywords": [],
   "author": "",

@@ -17,11 +17,11 @@ const connectRedis = async () => {
             await redisClient.ping();
             console.log('Upstash Redis Connected');
         }
-        // Otherwise use local Redis (for development)
-        else {
+        // Otherwise use local Redis (for development) - only if explicitly enabled
+        else if (process.env.REDIS_URL) {
             console.log('Connecting to Local Redis...');
             redisClient = createClient({
-                url: process.env.REDIS_URL || 'redis://localhost:6379'
+                url: process.env.REDIS_URL
             });
 
             redisClient.on('error', (err) => {
@@ -33,20 +33,22 @@ const connectRedis = async () => {
             });
 
             await redisClient.connect();
+        } else {
+            console.log('⚠️  Redis not configured - running without caching');
+            redisClient = null;
         }
 
         return redisClient;
     } catch (error) {
-        console.error('❌ Failed to connect to Redis:', error);
-        throw error;
+        console.error('❌ Failed to connect to Redis:', error.message);
+        console.log('⚠️  Continuing without Redis...');
+        redisClient = null;
+        return null;
     }
 };
 
 const getRedisClient = () => {
-    if (!redisClient) {
-        throw new Error('Redis client not initialized. Call connectRedis() first.');
-    }
-    return redisClient;
+    return redisClient; // Return null if not initialized, let calling code handle it
 };
 
 export { connectRedis, getRedisClient };

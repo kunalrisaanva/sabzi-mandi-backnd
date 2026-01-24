@@ -2,8 +2,11 @@ import { ApiResponse } from "../utils/ApiResponse.js";
 import { ApiError } from "../utils/ApiError.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { User } from "../models/user.model.js";
-import { sendEmailOTP, sendPhoneOTP, verifyOTP, checkOTPRateLimit } from "../services/otp.service.js";
-import { getRedisClient } from "../config/redis.js";
+import { sendPhoneOTP, sendEmailOTP, verifyOTP, checkRateLimit } from "../services/otp.unified.service.js";
+
+// In-memory registration data store (since Redis may not be available)
+const registrationStore = new Map();
+const REGISTRATION_EXPIRY = 300000; // 5 minutes
 
 
 const genrateAccessTokenAndRefresToken = async (user) => {
@@ -12,16 +15,26 @@ const genrateAccessTokenAndRefresToken = async (user) => {
     return { refreshToken, accessToken }
 }
 
+// Clean expired registration data periodically
+setInterval(() => {
+    const now = Date.now();
+    for (const [key, data] of registrationStore.entries()) {
+        if (data.expiresAt < now) {
+            registrationStore.delete(key);
+        }
+    }
+}, 60000);
+
 // ============================================
-// REGISTRATION - Step 1: Send OTP (Store data in Redis)
+// REGISTRATION - Step 1: Send OTP
 // ============================================
 
 const userRegister = asyncHandler(async (req, res) => {
-    const { firstName, lastName, email, phone, password,address} = req.body;
+    const { firstName, lastName, email, phone, password, address, role } = req.body;
 
-    // Validation - must provide either email or phone
-    if (!email && !phone) {
-        throw new ApiError(400, "Please provide either email or phone number");
+    // Validation - must provide phone number
+    if (!phone) {
+        throw new ApiError(400, "Phone number is required");
     }
 
     if (!password) {
@@ -36,62 +49,46 @@ const userRegister = asyncHandler(async (req, res) => {
         throw new ApiError(400, "First name and last name are required");
     }
 
-    let identifier, type, existingUser;
-
-    // Determine if email or phone
-    if (email) {
-        identifier = email.trim();
-        type = 'email';
-        existingUser = await User.findOne({ email: identifier });
-    } else {
-        identifier = phone.trim();
-        type = 'phone';
-        existingUser = await User.findOne({ phone: identifier });
-    }
-
-    // Check if user already exists in MongoDB
+    const identifier = phone.trim();
+    
+    // Check if user already exists
+    const existingUser = await User.findOne({ phone: identifier });
     if (existingUser) {
-        throw new ApiError(400, `User with this ${type} already exists`);
+        throw new ApiError(400, "User with this phone number already exists");
     }
 
     // Check rate limit
-    const rateLimit = await checkOTPRateLimit(identifier, type);
+    const rateLimit = checkRateLimit(identifier, 'phone');
     if (!rateLimit.allowed) {
         throw new ApiError(429, rateLimit.message);
     }
 
-    // Store registration data temporarily in Redis (2 minutes)
-    const redisClient = getRedisClient();
+    // Store registration data in memory
     const registrationData = {
         firstName: firstName.trim(),
         lastName: lastName.trim(),
         email: email || null,
-        phone: phone || null,
+        phone: identifier,
         password,
-        address,
-        type
+        address: address || {},
+        role: role || 'farmer',
+        expiresAt: Date.now() + REGISTRATION_EXPIRY
     };
 
-    const redisKey = `registration:${type}:${identifier}`;
-
-    // Store in Redis (works with both Upstash and local Redis)
-    if (redisClient.set && typeof redisClient.set === 'function') {
-        // Upstash Redis
-        await redisClient.set(redisKey, JSON.stringify(registrationData), { ex: 120 });
-    } else {
-        // Local Redis
-        await redisClient.setEx(redisKey, 120, JSON.stringify(registrationData));
-    }
+    const registrationKey = `registration:phone:${identifier}`;
+    registrationStore.set(registrationKey, registrationData);
 
     // Send OTP
-    if (type === 'email') {
-        await sendEmailOTP(identifier);
-    } else {
-        await sendPhoneOTP(identifier);
+    const otpResult = await sendPhoneOTP(identifier);
+
+    // In dev mode, return OTP for testing
+    const responseData = { phone: identifier };
+    if (process.env.DEV_MODE === 'true' && otpResult.otp) {
+        responseData.otp = otpResult.otp; // Only in dev mode!
     }
 
     return res.json(
-        new ApiResponse(200, { [type]: identifier }, `OTP sent to ${type} successfully. Valid for 2 minutes.`)
+        new ApiResponse(200, responseData, "OTP sent successfully. Valid for 2 minutes.")
     );
 });
 
@@ -101,47 +98,37 @@ const userRegister = asyncHandler(async (req, res) => {
 // ============================================
 
 const verifyOTPAndRegister = asyncHandler(async (req, res) => {
-    const { email, phone, otp } = req.body;
+    const { phone, otp } = req.body;
 
     // Validation
-    if (!email && !phone) {
-        throw new ApiError(400, "Please provide either email or phone number");
+    if (!phone) {
+        throw new ApiError(400, "Phone number is required");
     }
 
     if (!otp) {
         throw new ApiError(400, "OTP is required");
     }
 
-    let identifier, type;
-
-    // Determine if email or phone
-    if (email) {
-        identifier = email.trim();
-        type = 'email';
-    } else {
-        identifier = phone.trim();
-        type = 'phone';
-    }
+    const identifier = phone.trim();
 
     // Verify OTP
-    const otpVerification = await verifyOTP(identifier, otp, type);
+    const otpVerification = await verifyOTP(identifier, otp, 'phone');
     if (!otpVerification.success) {
         throw new ApiError(400, otpVerification.message);
     }
 
-    // Get registration data from Redis
-    const redisClient = getRedisClient();
-    const redisKey = `registration:${type}:${identifier}`;
-    const registrationDataStr = await redisClient.get(redisKey);
+    // Get registration data from memory store
+    const registrationKey = `registration:phone:${identifier}`;
+    const registrationData = registrationStore.get(registrationKey);
 
-    if (!registrationDataStr) {
+    if (!registrationData) {
         throw new ApiError(400, "Registration session expired. Please register again.");
     }
 
-    // Upstash Redis auto-parses JSON, local Redis returns string
-    const registrationData = typeof registrationDataStr === 'string'
-        ? JSON.parse(registrationDataStr)
-        : registrationDataStr;
+    if (registrationData.expiresAt < Date.now()) {
+        registrationStore.delete(registrationKey);
+        throw new ApiError(400, "Registration session expired. Please register again.");
+    }
 
     console.log('Registration Data:', registrationData);
 
@@ -149,21 +136,17 @@ const verifyOTPAndRegister = asyncHandler(async (req, res) => {
     const userData = {
         firstName: registrationData.firstName,
         lastName: registrationData.lastName,
-        password: registrationData.password
+        password: registrationData.password,
+        phone: identifier,
+        isPhoneVerified: true,
+        role: registrationData.role || 'farmer',
+        address: registrationData.address || {}
     };
-
-    if (email) {
-        userData.email = identifier;
-        userData.isEmailVerified = true;
-    } else {
-        userData.phone = identifier;
-        userData.isPhoneVerified = true;
-    }
 
     const createdUser = await User.create(userData);
 
-    // Delete registration data from Redis
-    await redisClient.del(redisKey);
+    // Delete registration data from memory
+    registrationStore.delete(registrationKey);
 
     // Generate tokens
     const { accessToken, refreshToken } = await genrateAccessTokenAndRefresToken(createdUser);
@@ -172,7 +155,7 @@ const verifyOTPAndRegister = asyncHandler(async (req, res) => {
 
     const userResponse = await User.findById(createdUser._id).select("-refreshToken");
 
-    return res.json(
+    return res.status(201).json(
         new ApiResponse(201, { user: userResponse, accessToken, refreshToken }, "User registered successfully")
     );
 });
@@ -240,5 +223,247 @@ const logout = asyncHandler(async (req, res) => {
     );
 });
 
+// ============================================
+// DEV REGISTRATION (No OTP - for testing)
+// ============================================
 
-export { userRegister, verifyOTPAndRegister, userLogin, logout }
+const devRegister = asyncHandler(async (req, res) => {
+    const { firstName, lastName, email, phone, password, role, address } = req.body;
+
+    // Validation
+    if (!email && !phone) {
+        throw new ApiError(400, "Please provide either email or phone number");
+    }
+
+    if (!password || password.length < 6) {
+        throw new ApiError(400, "Password must be at least 6 characters long");
+    }
+
+    if (!firstName || !lastName) {
+        throw new ApiError(400, "First name and last name are required");
+    }
+
+    // Check if user already exists
+    let existingUser;
+    if (email) {
+        existingUser = await User.findOne({ email: email.trim() });
+    }
+    if (phone) {
+        existingUser = existingUser || await User.findOne({ phone: phone.trim() });
+    }
+
+    if (existingUser) {
+        throw new ApiError(400, "User already exists");
+    }
+
+    // Create user directly without OTP
+    const userData = {
+        firstName: firstName.trim(),
+        lastName: lastName.trim(),
+        password,
+        role: role || "farmer",
+        address: address || {
+            village: "Default Village",
+            district: "Default District",
+            state: "Default State",
+            pincode: "000000"
+        }
+    };
+
+    if (email) {
+        userData.email = email.trim();
+        userData.isEmailVerified = true;
+    }
+    if (phone) {
+        userData.phone = phone.trim();
+        userData.isPhoneVerified = true;
+    }
+
+    const createdUser = await User.create(userData);
+
+    // Generate tokens
+    const { accessToken, refreshToken } = await genrateAccessTokenAndRefresToken(createdUser);
+    createdUser.refreshToken = refreshToken;
+    await createdUser.save({ validateBeforeSave: false });
+
+    const userResponse = await User.findById(createdUser._id).select("-refreshToken");
+
+    return res.status(201).json(
+        new ApiResponse(201, { user: userResponse, accessToken, refreshToken }, "User registered successfully")
+    );
+});
+
+// ============================================
+// GET USER PROFILE
+// ============================================
+
+const getUserProfile = asyncHandler(async (req, res) => {
+    const { userId } = req.params;
+
+    const user = await User.findById(userId).select("-refreshToken -password");
+    
+    if (!user) {
+        throw new ApiError(404, "User not found");
+    }
+
+    return res.json(
+        new ApiResponse(200, user, "User profile fetched successfully")
+    );
+});
+
+// ============================================
+// GET ALL USERS (for directory)
+// ============================================
+
+const getAllUsers = asyncHandler(async (req, res) => {
+    const { role, search } = req.query;
+    const currentUserId = req.user._id;
+
+    let query = { _id: { $ne: currentUserId } };
+
+    if (role && ["farmer", "trader", "cold-storage"].includes(role)) {
+        query.role = role;
+    }
+
+    if (search) {
+        query.$or = [
+            { firstName: { $regex: search, $options: 'i' } },
+            { lastName: { $regex: search, $options: 'i' } },
+            { phone: { $regex: search, $options: 'i' } }
+        ];
+    }
+
+    const users = await User.find(query)
+        .select("firstName lastName role phone address")
+        .limit(100);
+
+    return res.json(
+        new ApiResponse(200, users, "Users fetched successfully")
+    );
+});
+
+// ============================================
+// RESEND OTP
+// ============================================
+
+const resendOTP = asyncHandler(async (req, res) => {
+    const { phone } = req.body;
+
+    if (!phone) {
+        throw new ApiError(400, "Phone number is required");
+    }
+
+    const identifier = phone.trim();
+
+    // Check rate limit
+    const rateLimit = checkRateLimit(identifier, 'phone');
+    if (!rateLimit.allowed) {
+        throw new ApiError(429, rateLimit.message);
+    }
+
+    // Check if registration data exists
+    const registrationKey = `registration:phone:${identifier}`;
+    const registrationData = registrationStore.get(registrationKey);
+
+    if (!registrationData) {
+        throw new ApiError(400, "No pending registration found. Please register again.");
+    }
+
+    // Extend expiry
+    registrationData.expiresAt = Date.now() + REGISTRATION_EXPIRY;
+    registrationStore.set(registrationKey, registrationData);
+
+    // Send new OTP
+    const otpResult = await sendPhoneOTP(identifier);
+
+    const responseData = { phone: identifier };
+    if (process.env.DEV_MODE === 'true' && otpResult.otp) {
+        responseData.otp = otpResult.otp;
+    }
+
+    return res.json(
+        new ApiResponse(200, responseData, "OTP resent successfully")
+    );
+});
+
+// ============================================
+// LOGIN WITH OTP - Step 1: Send OTP
+// ============================================
+
+const sendLoginOTP = asyncHandler(async (req, res) => {
+    const { phone } = req.body;
+
+    if (!phone) {
+        throw new ApiError(400, "Phone number is required");
+    }
+
+    const identifier = phone.trim();
+
+    // Check if user exists
+    const user = await User.findOne({ phone: identifier });
+    if (!user) {
+        throw new ApiError(404, "User not found. Please register first.");
+    }
+
+    // Check rate limit
+    const rateLimit = checkRateLimit(identifier, 'phone');
+    if (!rateLimit.allowed) {
+        throw new ApiError(429, rateLimit.message);
+    }
+
+    // Send OTP
+    const otpResult = await sendPhoneOTP(identifier, 'login');
+
+    const responseData = { phone: identifier };
+    if (process.env.DEV_MODE === 'true' && otpResult.otp) {
+        responseData.otp = otpResult.otp;
+    }
+
+    return res.json(
+        new ApiResponse(200, responseData, "OTP sent successfully")
+    );
+});
+
+// ============================================
+// LOGIN WITH OTP - Step 2: Verify OTP
+// ============================================
+
+const verifyLoginOTP = asyncHandler(async (req, res) => {
+    const { phone, otp } = req.body;
+
+    if (!phone) {
+        throw new ApiError(400, "Phone number is required");
+    }
+
+    if (!otp) {
+        throw new ApiError(400, "OTP is required");
+    }
+
+    const identifier = phone.trim();
+
+    // Verify OTP
+    const otpVerification = await verifyOTP(identifier, otp, 'phone');
+    if (!otpVerification.success) {
+        throw new ApiError(400, otpVerification.message);
+    }
+
+    // Find user
+    const user = await User.findOne({ phone: identifier });
+    if (!user) {
+        throw new ApiError(404, "User not found");
+    }
+
+    // Generate tokens
+    const { accessToken, refreshToken } = await genrateAccessTokenAndRefresToken(user);
+    user.refreshToken = refreshToken;
+    await user.save({ validateBeforeSave: false });
+
+    const userResponse = await User.findById(user._id).select("-refreshToken -password");
+
+    return res.json(
+        new ApiResponse(200, { user: userResponse, accessToken, refreshToken }, "Login successful")
+    );
+});
+
+
+export { userRegister, verifyOTPAndRegister, userLogin, logout, devRegister, getUserProfile, getAllUsers, resendOTP, sendLoginOTP, verifyLoginOTP }

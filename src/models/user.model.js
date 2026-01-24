@@ -54,23 +54,21 @@ const user_schema = new mongoose.Schema({
     },
 
     address:{
-        type:String,
-        required:true,
         village:{
-            type:String,
-            required:true
+            type: String,
+            default: ""
         },
         district:{
-            type:String,
-            required:true
+            type: String,
+            default: ""
         },
         state:{
-            type:String,
-            required:true
+            type: String,
+            default: ""
         },
         pincode:{
-            type:String,
-            required:true
+            type: String,
+            default: ""
         }
     },
 
