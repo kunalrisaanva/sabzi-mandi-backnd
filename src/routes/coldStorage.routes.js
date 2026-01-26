@@ -14,11 +14,13 @@ const router = express.Router();
 
 // Public routes
 router.route("/").get(getAllColdStorages); // Get all with filters
-router.route("/:id").get(getColdStorageById); // Get by ID
 
-// Protected routes (require authentication)
+// Protected routes - MUST come before /:id routes
 router.route("/create").post(verify, createColdStorage); // Create
 router.route("/my").get(verify, getMyColdStorages); // Get my cold storages
+
+// Dynamic ID routes - MUST come after specific routes
+router.route("/:id").get(getColdStorageById); // Get by ID
 router.route("/:id").put(verify, updateColdStorage); // Update
 router.route("/:id").delete(verify, deleteColdStorage); // Delete
 router.route("/:id/toggle").patch(verify, toggleAvailability); // Toggle availability

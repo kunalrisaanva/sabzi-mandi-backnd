@@ -14,7 +14,8 @@ router.get("/", async (req, res) => {
         
         const posts = await Post.find(query)
             .populate("author", "firstName lastName role")
-            .populate("comments.user", "firstName lastName")
+            .populate("comments.user", "firstName lastName role")
+            .populate("comments.replies.user", "firstName lastName role")
             .sort({ createdAt: -1 })
             .skip((page - 1) * limit)
             .limit(parseInt(limit));
@@ -40,7 +41,8 @@ router.get("/:id", async (req, res) => {
     try {
         const post = await Post.findById(req.params.id)
             .populate("author", "firstName lastName role")
-            .populate("comments.user", "firstName lastName");
+            .populate("comments.user", "firstName lastName role")
+            .populate("comments.replies.user", "firstName lastName role");
         
         if (!post) {
             return res.status(404).json({ success: false, message: "Post not found" });
@@ -112,6 +114,10 @@ router.post("/:id/comment", authMiddleware, async (req, res) => {
     try {
         const { text } = req.body;
         
+        if (!text || text.trim() === '') {
+            return res.status(400).json({ success: false, message: "Comment text is required" });
+        }
+        
         const post = await Post.findById(req.params.id);
         
         if (!post) {
@@ -120,18 +126,160 @@ router.post("/:id/comment", authMiddleware, async (req, res) => {
         
         post.comments.push({
             user: req.user._id,
-            text
+            text: text.trim(),
+            replies: [],
+            likes: []
         });
         
         await post.save();
         
         const updatedPost = await Post.findById(post._id)
-            .populate("comments.user", "firstName lastName");
+            .populate("comments.user", "firstName lastName role")
+            .populate("comments.replies.user", "firstName lastName role");
         
         res.status(200).json({
             success: true,
             message: "Comment added",
             data: { comments: updatedPost.comments }
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+// Add reply to a comment (protected)
+router.post("/:postId/comment/:commentId/reply", authMiddleware, async (req, res) => {
+    try {
+        const { text } = req.body;
+        const { postId, commentId } = req.params;
+        
+        if (!text || text.trim() === '') {
+            return res.status(400).json({ success: false, message: "Reply text is required" });
+        }
+        
+        const post = await Post.findById(postId);
+        
+        if (!post) {
+            return res.status(404).json({ success: false, message: "Post not found" });
+        }
+        
+        const comment = post.comments.id(commentId);
+        
+        if (!comment) {
+            return res.status(404).json({ success: false, message: "Comment not found" });
+        }
+        
+        comment.replies.push({
+            user: req.user._id,
+            text: text.trim()
+        });
+        
+        await post.save();
+        
+        const updatedPost = await Post.findById(postId)
+            .populate("comments.user", "firstName lastName role")
+            .populate("comments.replies.user", "firstName lastName role");
+        
+        const updatedComment = updatedPost.comments.id(commentId);
+        
+        res.status(200).json({
+            success: true,
+            message: "Reply added",
+            data: { comment: updatedComment }
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+// Like/Unlike a comment (protected)
+router.patch("/:postId/comment/:commentId/like", authMiddleware, async (req, res) => {
+    try {
+        const { postId, commentId } = req.params;
+        
+        const post = await Post.findById(postId);
+        
+        if (!post) {
+            return res.status(404).json({ success: false, message: "Post not found" });
+        }
+        
+        const comment = post.comments.id(commentId);
+        
+        if (!comment) {
+            return res.status(404).json({ success: false, message: "Comment not found" });
+        }
+        
+        const userId = req.user._id;
+        const isLiked = comment.likes.some(id => id.toString() === userId.toString());
+        
+        if (isLiked) {
+            comment.likes = comment.likes.filter(id => id.toString() !== userId.toString());
+        } else {
+            comment.likes.push(userId);
+        }
+        
+        await post.save();
+        
+        res.status(200).json({
+            success: true,
+            message: isLiked ? "Comment unliked" : "Comment liked",
+            data: { likesCount: comment.likes.length }
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+// Track share (protected)
+router.patch("/:id/share", authMiddleware, async (req, res) => {
+    try {
+        const post = await Post.findByIdAndUpdate(
+            req.params.id,
+            { $inc: { shares: 1 } },
+            { new: true }
+        );
+        
+        if (!post) {
+            return res.status(404).json({ success: false, message: "Post not found" });
+        }
+        
+        res.status(200).json({
+            success: true,
+            message: "Share tracked",
+            data: { shares: post.shares }
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+// Delete comment (protected - only comment author)
+router.delete("/:postId/comment/:commentId", authMiddleware, async (req, res) => {
+    try {
+        const { postId, commentId } = req.params;
+        
+        const post = await Post.findById(postId);
+        
+        if (!post) {
+            return res.status(404).json({ success: false, message: "Post not found" });
+        }
+        
+        const comment = post.comments.id(commentId);
+        
+        if (!comment) {
+            return res.status(404).json({ success: false, message: "Comment not found" });
+        }
+        
+        if (comment.user.toString() !== req.user._id.toString()) {
+            return res.status(403).json({ success: false, message: "Not authorized to delete this comment" });
+        }
+        
+        post.comments.pull(commentId);
+        await post.save();
+        
+        res.status(200).json({
+            success: true,
+            message: "Comment deleted"
         });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });

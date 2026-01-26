@@ -19,14 +19,20 @@ app.get("/", (req, res) => res.json({ msg: "Api is Running" }));
 import { router as userRouter } from "./routes/user.routes.js";
 import { router as coldStorageRouter } from "./routes/coldStorage.routes.js";
 import { router as chatRouter } from "./routes/chat.routes.js";
+import { router as bookingRouter } from "./routes/booking.routes.js";
+import { router as notificationRouter } from "./routes/notification.routes.js";
 import postRouter from "./routes/post.routes.js";
 import listingRouter from "./routes/listing.routes.js";
+import { router as traderRequestRouter } from "./routes/traderRequest.routes.js";
 
 app.use("/api/v1/user", userRouter);
 app.use("/api/v1/cold-storage", coldStorageRouter);
 app.use("/api/v1/chat", chatRouter);
+app.use("/api/v1/bookings", bookingRouter);
+app.use("/api/v1/notifications", notificationRouter);
 app.use("/api/v1/posts", postRouter);
 app.use("/api/v1/listings", listingRouter);
+app.use("/api/v1/trader-requests", traderRequestRouter);
 
 
 
